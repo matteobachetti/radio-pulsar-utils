@@ -251,3 +251,8 @@ def dedispersion_search(data, dmmin, dmmax, start_freq, bandwidth, sample_time, 
     return table
 
 
+def apply_dm_shifts_to_data(data, shifts):
+    new_data = np.copy(data)
+    for i, d in enumerate(data):
+        new_data[i] = np.roll(data[i], -np.rint(shifts[i]).astype(int))
+    return new_data

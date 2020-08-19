@@ -10,40 +10,17 @@ import numpy as np
 import tqdm
 import matplotlib.pyplot as plt
 
-from sigpyproc.Readers import FilReader
 from scipy.signal import medfilt, savgol_filter
 from scipy.ndimage import gaussian_filter, gaussian_filter
-from statsmodels.robust import mad
 from astropy import log
 from astropy.table import Table
 
-from dedispersion import dedispersion_plan, dedisperse, dedispersion_shifts, delta_delay
-from dedispersion import dedispersion_search as fast_dedispersion_search
-from dedispersion import quick_resample, quick_chan_rebin, apply_dm_shifts_to_data
+from sigpyproc.Readers import FilReader
 
-
-def ref_mad(array, window=1):
-    """Ref. Median Absolute Deviation of an array, rolling median-subtracted.
-
-    If a data series is noisy, it is difficult to determine the underlying
-    statistics of the original series. Here, the MAD is calculated in a rolling
-    window, and the minimum is saved, because it will likely be the interval
-    with less noise.
-
-    Parameters
-    ----------
-    array : ``numpy.array`` object or list
-        Input data
-    window : int or float
-        Number of bins of the window
-
-    Returns
-    -------
-    ref_std : float
-        The reference MAD
-    """
-
-    return mad(np.diff(array)) / np.sqrt(2)
+from .dedispersion import dedispersion_plan, dedisperse, dedispersion_shifts, delta_delay
+from .dedispersion import dedispersion_search as fast_dedispersion_search
+from .dedispersion import quick_resample, quick_chan_rebin, apply_dm_shifts_to_data
+from .stats import ref_mad, get_bad_chans
 
 
 @dataclass
@@ -269,25 +246,13 @@ def dm_broadening(dm, freq, df):
     return 8300 * dm * df / freq**3
 
 
-def get_spectral_stats(fname, chunksize=1000):
-    fil = FilReader(fname)
-    header = fil.header
-    nsamples = header['nsamples']
-    spectrum = 0
-    for istart in tqdm.tqdm(range(0, nsamples, chunksize)):
-        chunk_size = min(step, nsamples - istart)
-        array = fil.readBlock(istart, chunk_size, as_filterbankBlock=False)
-        spectrum += array.sum(0)
-        spectrsq += (array ** 2).sum(0)
-
-    mean_spec = spectrum / nsamples
-    std_spec = np.sqrt(spectrsq / nsamples - mean ** 2)
-    return mean_spec, std_spec
-
-
 def search_by_chunks(fname, chunk_length=None, new_sample_time=None, tmin=0, dmmin=200, dmmax=800, surelybad=[]):
     log.info(f"Opening file {fname}")
     fname_root = os.path.basename(fname).split('.')[0]
+
+    mask = get_bad_chans(fname)
+    for bad_chan in surelybad:
+        mask[bad_chan] = True
 
     fil = FilReader(fname)
     header = fil.header
@@ -332,11 +297,6 @@ def search_by_chunks(fname, chunk_length=None, new_sample_time=None, tmin=0, dmm
             continue
         iend = istart + chunk_size
         array = fil.readBlock(istart, chunk_size, as_filterbankBlock=False)
-        mask = get_noisier_channels(array)
-        mask = measure_channel_variability(array, badchans_mask=mask)
-
-        for bad_chan in surelybad:
-            mask[bad_chan] = True
 
         array = renormalize_data(array, badchans_mask=mask)
         array = (array - array.min()) / np.std(array)
@@ -366,7 +326,7 @@ def search_by_chunks(fname, chunk_length=None, new_sample_time=None, tmin=0, dmm
 
             # plt.show()
 
-def main(args=None):
+def main_search(args=None):
     import argparse
     parser = \
         argparse.ArgumentParser(description="Clean the data and search for FRBs")
@@ -378,39 +338,6 @@ def main(args=None):
         #     surelybad=np.concatenate((np.arange(32, 37), np.arange(230, 241))))
         # save_data_to_job(fname, new_sample_time=0.001, dmmin=700, dmmax=850,
         #     surelybad=[1, 2, 5, 6, 7])
-        save_data_to_job(fname, new_sample_time=None, dmmin=300, dmmax=400,
-            surelybad=np.concatenate((np.arange(32, 37), np.arange(230, 241))))
-
-
-def main_stats(args=None):
-    import argparse
-    parser = \
-        argparse.ArgumentParser(description="Get bad channels")
-    parser.add_argument("fnames", help="Input binary files", type=str, nargs='+')
-    args = parser.parse_args(args)
-
-    for fname in fnames:
-        mean_spec, mean_std = get_spectral_stats(fname)
-        badchans = np.zeros(mean_spec.size, dtype=bool)
-        chans = np.arange(mean_spec.size)
-
-        for spec in (mean_spec, mean_std):
-            plt.figure(fname)
-            smooth_spec = medfilt(spec, 11, 3)
-            spec_mad = ref_mad(array)
-            threshold
-            plt.plot(chans, spec, color='grey')
-            plt.plot(chans, smooth_spec, color='k')
-            plt.plot(chans, threshold, color='r')
-            badchans = badchans | (spec > threshold)
-            spec[badchans] = smooth_spec[bad_chans]
-            plt.plot(chans, spec, color='b', ls=2)
-
-        print(f"Bad chans: {chans[badchans]}")
-
-
-
-
-
+        search_by_chunks(fname, new_sample_time=None, dmmin=300, dmmax=400)
 
 
