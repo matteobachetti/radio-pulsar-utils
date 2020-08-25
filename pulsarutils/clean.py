@@ -11,7 +11,7 @@ import tqdm
 import matplotlib.pyplot as plt
 
 from scipy.signal import medfilt, savgol_filter
-from scipy.ndimage import gaussian_filter, gaussian_filter
+from scipy.ndimage import uniform_filter1d, gaussian_filter, median_filter
 from astropy import log
 from astropy.table import Table
 
@@ -67,25 +67,46 @@ def get_noisier_channels(array):
     return badchans
 
 
-def renormalize_data(array, diagnostic_figure=None, badchans_mask=None, baseline_window=31):
+def renormalize_data(array, diagnostic_figure=None, badchans_mask=None, baseline_window=101,
+                     cut_outliers=False):
     from scipy import signal
     renorm_data = np.copy(array).astype(float)
     if badchans_mask is None:
         badchans_mask = np.zeros(renorm_data.shape[0], dtype=bool)
 
     lc = renorm_data[~badchans_mask, :].mean(0)
+    baseline_window = min(baseline_window, lc.size // 100 * 2 + 1)
     lc_smooth = gaussian_filter(lc, baseline_window)
     factor = np.median(lc_smooth) / lc_smooth
     for i, newd in enumerate(renorm_data):
         renorm_data[i, :] *= factor
 
     spec = renorm_data.mean(1)
-    smooth_spec = medfilt(spec, 7)
 
     for i, newd in enumerate(renorm_data):
         renorm_data[i, :] = (newd - spec[i]) / spec[i]
 
     renorm_data[badchans_mask, :] = 0
+    # renorm_data[np.roll(badchans_mask, 1), :] = 0
+    # renorm_data[np.roll(badchans_mask, -1), :] = 0
+
+    if cut_outliers:
+        lc = renorm_data.mean(0)
+        for rebin_window in range(0, 5):
+            window = 1<<rebin_window
+            lc_rebin = uniform_filter1d(lc, window)
+            thresh_up = 5 * np.std(lc_rebin[::window])
+            thresh_down = -3 * np.std(lc_rebin[::window])
+
+            bad_bins = (lc_rebin > + thresh_up) | (lc_rebin < thresh_down)
+            # plt.plot(lc_rebin + rebin_window, alpha=0.5, lw=0.5, c='grey')
+            # plt.axhline(thresh + rebin_window)
+        # plt.plot(lc, alpha=0.5)
+        renorm_data[:, bad_bins] = 0
+        # plt.plot(lc)
+        # plt.plot(renorm_data.mean(0), alpha=0.5, zorder=10)
+        # plt.plot(lc_smooth, lw=2)
+        # plt.show()
 
     return renorm_data
 
@@ -110,10 +131,6 @@ def measure_channel_variability(array, badchans_mask=None):
     clean_spec[badchans] = 0
 
     return badchans
-
-
-# def dm_time_shift(dm, freq):
-#     return 4149 * dm / freq ** 2
 
 
 def dedispersion_search(info, dmmin, dmmax):
@@ -192,10 +209,6 @@ def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0, show=
     snr = table['snr'][maxsnr]
     window = table['rebin'][maxsnr]
 
-    #
-    # array = gaussian_filter(array.astype(np.float), 20.)
-    #
-
     shifts = dedispersion_shifts(nchan, dm, start_freq, bandwidth, sample_time)
     dedisp = apply_dm_shifts_to_data(array, shifts)
     array = quick_resample(array, window)
@@ -230,33 +243,17 @@ def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0, show=
     ax20.set_xlabel("Max - Median (arbitrary units)")
     ax20b.set_xlabel("H test (arbitrary units)")
 
-
-    # vmin = np.median(array)
-    # vmax = vmin + np.std(array)
-
-    # array = quick_chan_rebin(gaussian_filter(array, 2), 4)
-    # array = quick_rebin(array, 4)
-
     ax00.pcolormesh(times, allfreqs, array, rasterized=True)
     ax01.pcolormesh(times, allfreqs, dedisp, rasterized=True)
     ax10.plot(times, array.mean(0), rasterized=True)
     ax11.plot(times, dedisp.mean(0), rasterized=True)
     ax21.pcolormesh(times, trial_DMs, dedispersed_plane, rasterized=True)
     ax20.plot(-table['snr'], table['DM'])
-    # digitized =
     digitized_plane = digitize(dedispersed_plane)
     h_values = [-h_test(row, nmax=row.size // 10)[0] for row in digitized_plane]
 
     ax20b.plot(h_values, trial_DMs)
     ax00.set_xlim(t0, times[-1])
-
-    # for dm, digrow in zip(trial_DMs, digitized_plane):
-    #     imax = np.argmax(digrow)
-    #     # print(row[imax])
-    #     h_local = h_test(digrow[max(imax - 40, 0) : imax + 40], nmax=20)[0]
-    #     print(dm, np.max(digrow) - np.min(digrow), h_test(digrow, nmax=digrow.size // 10), h_local)
-    #     ax20b.scatter(-h_local, dm)
-    #     # print(dm, h_test(digitize(row), nmax=40))
 
     text = f"""
     Obs. Date: {info.date}
@@ -266,8 +263,7 @@ def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0, show=
     """
     ax20.text(0.5, 0.5, text, va="center", ha="center", transform=ax20.transAxes)
 
-    plt.tight_layout()
-    plt.savefig(f'{outname}')
+    plt.savefig(f'{outname}',bbox_inches='tight')
     if show:
         plt.show()
     plt.close(fig)
@@ -331,13 +327,13 @@ def search_by_chunks(fname, chunk_length=None, new_sample_time=None, tmin=0, dmm
         array = fil.readBlock(istart, chunk_size, as_filterbankBlock=False)
 
         array = renormalize_data(array, badchans_mask=mask)
-        array = (array - array.min()) / np.std(array)
+        print(not np.any(array[mask, :]))
+        # array = (array - array.min()) / np.std(array)
         if foff < 0:
             array = array[::-1]
 
         if N > 1:
             array = quick_resample(array, N)
-            # array = quick_chan_rebin(array, 4)
 
         info.allprofs = array
         info.start_freq = start_freq
@@ -347,16 +343,13 @@ def search_by_chunks(fname, chunk_length=None, new_sample_time=None, tmin=0, dmm
         info.date = date
         info.pulse_freq = 1 / (info.nbin * new_sample_time)
 
-        t = time.time()
         table = fast_dedispersion_search(info.allprofs, dmmin, dmmax, start_freq, bandwidth, new_sample_time)
-        # print(time.time() - t)
+        plot_diagnostics(info, outname=f'{fname_root}_{istart}-{iend}.jpg', dmmin=dmmin, dmmax=dmmax, t0=t0, show=True)
 
-        # print(t0, table[np.argmax(table['snr'])])
         if np.any(table['snr'] > 6):
             plot_diagnostics(info, outname=f'{fname_root}_{istart}-{iend}.jpg', dmmin=dmmin, dmmax=dmmax, t0=t0)
             pickle.dump(info, open(f'{fname_root}_{istart}-{iend}.pkl', 'wb'))
 
-            # plt.show()
 
 def cleanup_data(fname, outname):
     mask = get_bad_chans(fname)

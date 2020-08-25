@@ -32,7 +32,7 @@ def ref_mad(array, window=1):
     return mad(np.diff(array)) / np.sqrt(2)
 
 
-def get_spectral_stats(fname, chunksize=100000):
+def get_spectral_stats(fname, chunksize=10000, show=False):
     log.info("Getting spectral statistics...")
     fil = FilReader(fname)
     header = fil.header
@@ -42,15 +42,21 @@ def get_spectral_stats(fname, chunksize=100000):
     for istart in tqdm.tqdm(range(0, nsamples, chunksize)):
         size = min(chunksize, nsamples - istart)
         array = fil.readBlock(istart, size, as_filterbankBlock=False)
-        # print(arrayq)
         local_spec = array.astype(float).sum(1)
         local_sq = ((array).astype(float) **2).sum(1)
         spectrum += local_spec
         spectrsq += local_sq
+        if show:
+            plt.figure("Spectrum")
+            plt.plot(local_spec, lw=0.5, alpha=0.5, color='k')
+            plt.figure("Var spectrum")
+            plt.plot(np.sqrt(local_sq / size - (local_spec / size)**2), lw=0.5, alpha=0.5, color='k')
 
     mean_spec = spectrum / nsamples
     mean_spectrsq = spectrsq / nsamples
     std_spec = np.sqrt(mean_spectrsq - mean_spec ** 2)
+    if show:
+        plt.show()
     return mean_spec, std_spec
 
 
@@ -58,8 +64,9 @@ def get_bad_chans(fname, show=False, cache=None):
     if cache is None:
         cache = fname + '.badchans'
     if os.path.exists(cache):
-        return np.loadtxt(cache)
-    mean_spec, mean_std = get_spectral_stats(fname)
+        badchans = np.loadtxt(cache).astype(np.bool)
+        return badchans
+    mean_spec, mean_std = get_spectral_stats(fname, show=show)
     badchans = np.zeros(mean_spec.size, dtype=bool)
     chans = np.arange(mean_spec.size)
 
@@ -79,7 +86,7 @@ def get_bad_chans(fname, show=False, cache=None):
     if show:
         plt.show()
     print(f"Bad chans: {chans[badchans]}")
-    np.savetxt(cache, [badchans])
+    np.savetxt(cache, [badchans], fmt='%g')
     return badchans
 
 
