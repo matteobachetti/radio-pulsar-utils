@@ -4,7 +4,7 @@ import pickle
 from dataclasses import dataclass
 
 import matplotlib as mpl
-mpl.use('Agg')
+# mpl.use('Agg')
 
 import numpy as np
 import tqdm
@@ -17,10 +17,11 @@ from astropy.table import Table
 
 from sigpyproc.Readers import FilReader
 
+from hendrics.efsearch import h_test
 from .dedispersion import dedispersion_plan, dedisperse, dedispersion_shifts, delta_delay
 from .dedispersion import dedispersion_search as fast_dedispersion_search
 from .dedispersion import quick_resample, quick_chan_rebin, apply_dm_shifts_to_data
-from .stats import ref_mad, get_bad_chans
+from .stats import mad, ref_mad, get_bad_chans
 
 
 @dataclass
@@ -162,7 +163,16 @@ def dedispersion_search(info, dmmin, dmmax):
     return dedispersed_plane, table
 
 
-def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0):
+def digitize(data):
+    if isinstance(data, np.int):
+        return data
+    std = mad(data)
+    data = (data - np.median(data)) / std * 3
+    data[data < 0] = 0
+    return np.rint(data).astype(int)
+
+
+def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0, show=False):
     array = info.allprofs
     start_freq = info.start_freq
     bandwidth = info.bandwidth
@@ -196,16 +206,30 @@ def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0):
     times = samples * sample_time * window + t0
 
     fig = plt.figure(figsize=(10,8), dpi=50)
-    gs = plt.GridSpec(3, 2, height_ratios=(1, 1, 1.5))
-    ax00 = plt.subplot(gs[0, 0])
-    ax01 = plt.subplot(gs[0, 1], sharex=ax00, sharey=ax00)
-    ax10 = plt.subplot(gs[1, 0], sharex=ax00)
-    ax11 = plt.subplot(gs[1, 1], sharex=ax00, sharey=ax10)
-    ax21 = plt.subplot(gs[2, 1], sharex=ax00)
-    ax20 = plt.subplot(gs[2, 0])
-    ax01.tick_params(labelbottom=False, labelleft=False)
-    ax00.tick_params(labelbottom=False)
-    ax11.tick_params(labelbottom=False, labelleft=False)
+    gs = plt.GridSpec(3, 3, height_ratios=(1.5, 1, 1), width_ratios=[0.5, 0.5, 1], hspace=0.01, wspace=0.01)
+    ax00 = plt.subplot(gs[2, 0:2])
+    ax01 = plt.subplot(gs[2, 2], sharex=ax00, sharey=ax00)
+    ax10 = plt.subplot(gs[1, 0:2], sharex=ax00)
+    ax11 = plt.subplot(gs[1, 2], sharex=ax00, sharey=ax10)
+    ax21 = plt.subplot(gs[0, 2], sharex=ax00)
+    ax20 = plt.subplot(gs[0, 0])
+    ax20b = plt.subplot(gs[0, 1])
+
+    for ax in [ax20, ax20b, ax21, ax10, ax11]:
+        ax.tick_params(labelbottom=False)
+
+    for ax in [ax21, ax11, ax01]:
+        ax.tick_params(labelleft=False)
+
+    ax01.set_xlabel("Time (s)")
+    ax00.set_xlabel("Time (s)")
+    ax00.set_ylabel("Frequency (MHz)")
+    ax10.set_ylabel("Flux (arbitrary units)")
+
+    ax20.set_ylabel("Trial DM")
+    ax20.set_xlabel("Max - Median (arbitrary units)")
+    ax20b.set_xlabel("H test (arbitrary units)")
+
 
     # vmin = np.median(array)
     # vmax = vmin + np.std(array)
@@ -218,15 +242,21 @@ def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0):
     ax10.plot(times, array.mean(0), rasterized=True)
     ax11.plot(times, dedisp.mean(0), rasterized=True)
     ax21.pcolormesh(times, trial_DMs, dedispersed_plane, rasterized=True)
+    ax20.plot(-table['snr'], table['DM'])
+    # digitized =
+    digitized_plane = digitize(dedispersed_plane)
+    h_values = [-h_test(row, nmax=row.size // 10)[0] for row in digitized_plane]
 
-    ax11.set_xlabel("Time (s)")
-    ax10.set_xlabel("Time (s)")
-    ax00.set_ylabel("Frequency (MHz)")
-    ax10.set_ylabel("Flux (arbitrary units)")
-
-    ax21.set_xlabel("Time (s)")
-    ax21.set_ylabel("Trial DM")
+    ax20b.plot(h_values, trial_DMs)
     ax00.set_xlim(t0, times[-1])
+
+    # for dm, digrow in zip(trial_DMs, digitized_plane):
+    #     imax = np.argmax(digrow)
+    #     # print(row[imax])
+    #     h_local = h_test(digrow[max(imax - 40, 0) : imax + 40], nmax=20)[0]
+    #     print(dm, np.max(digrow) - np.min(digrow), h_test(digrow, nmax=digrow.size // 10), h_local)
+    #     ax20b.scatter(-h_local, dm)
+    #     # print(dm, h_test(digitize(row), nmax=40))
 
     text = f"""
     Obs. Date: {info.date}
@@ -234,11 +264,12 @@ def plot_diagnostics(info, outname='info.jpg', dmmin=200, dmmax=800, t0=0):
     Best DM:   {dm}
     Best SNR:  {snr}
     """
-    ax20.text(0.5, 0.5, text, va="center", ha="center")
+    ax20.text(0.5, 0.5, text, va="center", ha="center", transform=ax20.transAxes)
 
     plt.tight_layout()
     plt.savefig(f'{outname}')
-    # plt.show()
+    if show:
+        plt.show()
     plt.close(fig)
 
 
@@ -273,6 +304,7 @@ def search_by_chunks(fname, chunk_length=None, new_sample_time=None, tmin=0, dmm
 
     step = max(int(chunk_length / sample_time) * 2, 128)
 
+    # Get the _minimum_ DM broadening to set the automatic rebinning
     dm_dt = dm_broadening(dmmin, start_freq, np.abs(foff))
 
     if new_sample_time is None:
@@ -326,11 +358,17 @@ def search_by_chunks(fname, chunk_length=None, new_sample_time=None, tmin=0, dmm
 
             # plt.show()
 
+def cleanup_data(fname, outname):
+    mask = get_bad_chans(fname)
+    fil = FilReader(fname)
+
+
+
 def main_search(args=None):
     import argparse
     parser = \
         argparse.ArgumentParser(description="Clean the data and search for FRBs")
-    parser.add_argument("fnames", help="Input binary files", type=str, nargs='+')
+    parser.add_argument("fnames", help="Input binary files in filterbank format", type=str, nargs='+')
     args = parser.parse_args(args)
 
     for fname in args.fnames:
@@ -340,4 +378,18 @@ def main_search(args=None):
         #     surelybad=[1, 2, 5, 6, 7])
         search_by_chunks(fname, new_sample_time=None, dmmin=300, dmmax=400)
 
+
+def main_clean(args=None):
+    import argparse
+    parser = \
+        argparse.ArgumentParser(description="Clean the data")
+    parser.add_argument("fnames", help="Input binary files in filterbank format", type=str, nargs='+')
+    args = parser.parse_args(args)
+
+    for fname in args.fnames:
+        # save_data_to_job(fname, new_sample_time=0.001, tmin=2250, dmmin=300, dmmax=400,
+        #     surelybad=np.concatenate((np.arange(32, 37), np.arange(230, 241))))
+        # save_data_to_job(fname, new_sample_time=0.001, dmmin=700, dmmax=850,
+        #     surelybad=[1, 2, 5, 6, 7])
+        search_by_chunks(fname, new_sample_time=None, dmmin=300, dmmax=400)
 
